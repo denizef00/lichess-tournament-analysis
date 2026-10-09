@@ -1,0 +1,29 @@
+# Credentials & secrets (Sıfır tolerans kuralı - Madde 6)
+.env
+.env.local
+*.env
+
+# Ham veri klasörü (Büyük dosyaların Git'e girmemesi ve temiz kalması için - Madde 5)
+data/raw/games
+data/raw/tournaments
+
+# Python derleme ve bytecode çıktıları
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Sanal ortamlar (Virtual environments)
+.venv/
+venv/
+ENV/
+env/
+
+# IDE ve editör ayar dosyaları
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# İşletim sistemi kalıntıları
+.DS_Store
+Thumbs.db
