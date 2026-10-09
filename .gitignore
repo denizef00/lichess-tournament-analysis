@@ -3,9 +3,6 @@
 .env.local
 *.env
 
-# Ham veri klasörü (Büyük dosyaların Git'e girmemesi ve temiz kalması için - Madde 5)
-data/raw/games
-data/raw/tournaments
 
 # Python derleme ve bytecode çıktıları
 __pycache__/
