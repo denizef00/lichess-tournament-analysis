@@ -1,26 +1,30 @@
-# Credentials & secrets (Sıfır tolerans kuralı - Madde 6)
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+*.db
+*.sqlite3
+
 .env
 .env.local
 *.env
 
-
-# Python derleme ve bytecode çıktıları
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Sanal ortamlar (Virtual environments)
 .venv/
 venv/
 ENV/
 env/
 
-# IDE ve editör ayar dosyaları
+.pytest_cache/
+check_temp.db
+tmp/
+
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# İşletim sistemi kalıntıları
 .DS_Store
 Thumbs.db
