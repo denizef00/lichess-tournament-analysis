@@ -63,6 +63,7 @@ def clean_tournaments(con):
     rows = con.execute(
         """SELECT tournament_key, status, nb_players, max_rating, variant,
                   finishes_at, retrieved_at FROM tournament""").fetchall()
+    latest_fetch = con.execute("SELECT MAX(retrieved_at) FROM tournament").fetchone()[0]
 
     # Fences are computed per variant (levels differ); small groups fall back to the global fence.
     by_variant, all_finished = defaultdict(list), []
@@ -82,8 +83,9 @@ def clean_tournaments(con):
         # finish time already passed when the snapshot was taken, but status is not "finished"
         # -> the snapshot is stale (inferred; the true final state is unknown)
         stale = (st is not None and st != C.TOURNAMENT_FINISHED
-                 and r["finishes_at"] is not None
-                 and r["finishes_at"] < r["retrieved_at"])
+            and r["finishes_at"] is not None
+            and latest_fetch is not None
+            and r["finishes_at"] < latest_fetch)
         running = (st is not None and st != C.TOURNAMENT_FINISHED and not stale)
         fence = variant_fence.get((r["variant"] or "").casefold(), global_fence)
 
@@ -139,7 +141,6 @@ def clean_games(con):
         """SELECT g.game_id, g.tournament_key, g.opening_key, g.white_elo, g.black_elo,
                   g.white_rating_diff, g.black_rating_diff, g.moves, t.variant
            FROM game g JOIN tournament t ON t.tournament_key = g.tournament_key""").fetchall()
-
     # Fences use only valid values, so impossible values cannot distort them.
     elo_by_t, all_elo, diffs = defaultdict(list), [], []
     for r in rows:
@@ -172,7 +173,11 @@ def clean_games(con):
         bd, bd_f = flag_diff(r["black_rating_diff"], diff_fence)
 
         mv = r["moves"]
-        mv_c, mv_f = (None, "no_moves_played") if not (mv and mv.strip()) else (mv, "ok")
+        mv_s = (mv or "").strip()
+        if not mv_s or C.NO_MOVES_RE.fullmatch(mv_s):
+            mv_c, mv_f = None, "no_moves_played"
+        else:
+            mv_c, mv_f = mv, "ok"
 
         out.append((r["game_id"],
                     ok_raw, ok_raw, ok_f,
