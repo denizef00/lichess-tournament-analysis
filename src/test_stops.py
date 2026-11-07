@@ -16,27 +16,40 @@ VALIDATE = ROOT / "src" / "validate.py"
 
 # (check name as printed by validate.py, statement that breaks the copy)
 BREAKS = (
-    ("game_clean row count equals game",
+    ("game_clean row count equals game", "STOP",
      "DELETE FROM game_clean WHERE rowid = 1"),
-    ("no impossible cleaned value",
+    ("no impossible cleaned value", "STOP",
      "UPDATE game_clean SET white_elo = -5 WHERE rowid = 1"),
-    ("foreign_key_check",
+    ("foreign_key_check", "STOP",
      "UPDATE game SET tournament_key = 99999 WHERE rowid = 1"),
-    ("_raw columns equal M2 values",
+    ("_raw columns equal M2 values", "STOP",
      "UPDATE game_clean SET white_elo_raw = 1 WHERE rowid = 1"),
-    ("untrusted flags have NULL cleaned value",
+    ("untrusted flags have NULL cleaned value", "STOP",
      "UPDATE game_clean SET white_elo = 1500, white_elo_flag = 'invalid_range' WHERE rowid = 1"),
+    ("tournament_clean row count equals tournament", "STOP",
+     "DELETE FROM tournament_clean WHERE rowid = 1"),
+    ("usable elo share >= 90% per tournament", "WARN",
+     """UPDATE game_clean SET white_elo = NULL, white_elo_flag = 'missing_not_reported'
+        WHERE game_id IN (SELECT game_id FROM game WHERE tournament_key =
+            (SELECT tournament_key FROM game GROUP BY tournament_key
+             ORDER BY COUNT(*) DESC LIMIT 1))"""),
+    ("games inside tournament window", "WARN",
+     "UPDATE game SET played_at = '2000-01-01T00:00:00Z' WHERE rowid = 1"),
+    ("all player aliases resolve", "WARN",
+     """INSERT INTO player_alias (alias_source_id, canonical_source_id, alias_player_key,
+            canonical_player_key, kind, decided_by, decided_at, note)
+        VALUES ('ghost_a', 'ghost_b', NULL, NULL, 'test', 'test', '2026-01-01T00:00:00Z', '')"""),
 )
-
 
 def main():
     failed_to_fail = 0
     env = {**os.environ, "PYTHONUTF8": "1"}   # child prints utf-8 regardless of console code page
-    for name, sql in BREAKS:
+    for name, level, sql in BREAKS:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             copy = Path(tmp) / "test.db"
             shutil.copy(DB_PATH, copy)
             con = sqlite3.connect(copy)   # plain connection: foreign keys stay OFF
+            con.execute("PRAGMA ignore_check_constraints = ON")   # copy only: lets us write broken rows on purpose
             try:
                 with con:
                     con.execute(sql)
@@ -47,11 +60,11 @@ def main():
                                  errors="replace", env=env)
             line = next((l for l in res.stdout.splitlines() if name in l), "(line not found)")
             print(f"exit={res.returncode} | {line.strip()}")
-            if res.returncode != 1 or not line.strip().startswith("STOP"):
+            want_exit = 1 if level == "STOP" else 0
+            if res.returncode != want_exit or not line.strip().startswith(level):
                 failed_to_fail += 1
-    print("ALL STOP CHECKS CAN FAIL" if failed_to_fail == 0
-          else f"PROBLEM: {failed_to_fail} check(s) did not fail")
-
+    print("ALL CHECKS FIRE AS DESIGNED" if failed_to_fail == 0
+          else f"PROBLEM: {failed_to_fail} check(s) did not behave as expected")
 
 if __name__ == "__main__":
     main()
