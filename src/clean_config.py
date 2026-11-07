@@ -1,8 +1,12 @@
 """All thresholds and constants of the cleaning and validation steps.
 
 Every constant is justified in docs/cleaning_report.md (section 5).
-The values below are placeholders until the profiling notebook confirms them.
 """
+import re
+
+# --- Game: moves ---------------------------------------------------------
+# movetext that is only the result token = no move was played
+NO_MOVES_RE = re.compile(r"(1-0|0-1|1/2-1/2)")
 
 # --- Tournament -------------------------------------------------------
 TOURNAMENT_FINISHED = 30        # Lichess status code: finished (10 = created, 20 = started)
