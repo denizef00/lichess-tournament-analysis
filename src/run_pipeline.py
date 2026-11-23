@@ -27,7 +27,6 @@ def init_log_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS pipeline_run (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL,
             run_time TEXT NOT NULL,
             step TEXT NOT NULL,
@@ -36,8 +35,9 @@ def init_log_db(conn: sqlite3.Connection) -> None:
             duration_sec REAL NOT NULL,
             status TEXT NOT NULL,
             exit_code INTEGER NOT NULL,
-            error_message TEXT
-        )
+            error_message TEXT,
+            PRIMARY KEY (run_id, step)
+        ) STRICT;
         """
     )
     conn.commit()
@@ -129,8 +129,6 @@ def main() -> int:
     try:
         for step_name, script_path, timeout_sec in STEPS:
             if step_name == "ingest" and args.skip_ingest:
-                now = datetime.now(timezone.utc)
-                log_step(conn, run_id, args.run_time, step_name, now, now, "SKIPPED", 0, None)
                 print(f"[{run_id}] {step_name}: SKIPPED (--skip-ingest)")
                 continue
 
