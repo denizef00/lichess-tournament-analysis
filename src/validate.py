@@ -1,14 +1,18 @@
 """Data-quality expectations for the cleaned layer. Exits 1 if any STOP check fails.
 
-Usage: python src/validate.py [db_path]
-(the optional path is used to make each STOP fail on a temporary copy of the database)
+Usage: python src/validate.py [db_path] [--run-time ISO_TIMESTAMP]
 """
+import argparse
+import statistics
 import sys
+from datetime import datetime, timezone
 
 import clean_config as C
 from db import connect, DB_PATH
 
 RESULTS = []
+
+FRESHNESS_MAX_HOURS = getattr(C, "FRESHNESS_MAX_HOURS", 6.0)
 
 # Flags that mean "value not trusted" -> the cleaned value must be NULL
 UNTRUSTED_FLAGS = ("missing_not_reported", "missing_variant_has_no_openings",
@@ -24,6 +28,30 @@ TRUST_COLUMNS = (
 )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Data-quality expectations for the cleaned layer")
+    parser.add_argument(
+        "db_path",
+        nargs="?",
+        default=str(DB_PATH),
+        help="Optional database path (used by test_stops.py on a temporary copy)",
+    )
+    parser.add_argument(
+        "--run-time",
+        type=str,
+        default=datetime.now(timezone.utc).isoformat(),
+        help="Logical pipeline run timestamp in ISO-8601 UTC format",
+    )
+    return parser.parse_args()
+
+
+def parse_iso_utc(ts_str: str) -> datetime:
+    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def record(level, ok, name, detail):
     RESULTS.append(("PASS" if ok else level, name, detail))
 
@@ -32,7 +60,7 @@ def scalar(con, sql, params=()):
     return con.execute(sql, params).fetchone()[0]
 
 
-def checks(con):
+def checks(con, run_dt: datetime):
     # ---- STOP 1: cleaned tables have the same row count as the raw tables
     for clean, raw in (("tournament_clean", "tournament"), ("game_clean", "game")):
         c = scalar(con, "SELECT COUNT(*) FROM " + clean)
@@ -112,15 +140,61 @@ def checks(con):
         WHERE alias_player_key IS NULL OR canonical_player_key IS NULL""")
     record("WARN", broken == 0, "all player aliases resolve", f"{broken} unresolved")
 
+    # ---- WARN 5: data freshness relative to --run-time
+    newest_played = scalar(con, "SELECT MAX(played_at) FROM game WHERE played_at IS NOT NULL")
+    if not newest_played:
+        record("WARN", False, "data freshness relative to --run-time", "no games in database")
+    else:
+        newest_dt = parse_iso_utc(newest_played)
+        age_hours = (run_dt - newest_dt).total_seconds() / 3600.0
+        record(
+            "WARN",
+            age_hours <= FRESHNESS_MAX_HOURS,
+            "data freshness relative to --run-time",
+            f"newest game {age_hours:.1f}h old (limit {FRESHNESS_MAX_HOURS:.0f}h, ref {run_dt.strftime('%Y-%m-%dT%H:%M:%SZ')})",
+        )
+
+    # ---- WARN 6: batch row volume anomaly (0 rows or >10x median batch size)
+    batches = con.execute("""
+        SELECT retrieved_at, COUNT(*) AS cnt
+        FROM game
+        GROUP BY retrieved_at
+        ORDER BY retrieved_at
+    """).fetchall()
+    if not batches:
+        record("WARN", False, "latest batch volume within normal range", "0 games in database")
+    elif len(batches) == 1:
+        record("WARN", True, "latest batch volume within normal range",
+               f"latest batch {batches[0][1]:,} games (1 batch so far)")
+    else:
+        latest_cnt = batches[-1][1]
+        prior_counts = [row[1] for row in batches[:-1]]
+        median_cnt = statistics.median(prior_counts)
+        is_anomaly = (latest_cnt == 0) or (median_cnt > 0 and latest_cnt > 10 * median_cnt)
+        record(
+            "WARN",
+            not is_anomaly,
+            "latest batch volume within normal range",
+            f"latest {latest_cnt:,} vs median {median_cnt:,.0f} ({len(batches)} batches)",
+        )
+
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else DB_PATH
-    con = connect(path)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+
+    args = parse_args()
+    run_dt = parse_iso_utc(args.run_time)
+    con = connect(args.db_path)
     try:
-        checks(con)
+        checks(con, run_dt)
     except Exception as e:
         print(f"ERROR: {e!r}")
         sys.exit(1)
+    finally:
+        con.close()
+
     for status, name, detail in RESULTS:
         print(f"{status:5s} {name:50s} {detail}")
     stops = [r for r in RESULTS if r[0] == "STOP"]
