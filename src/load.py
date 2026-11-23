@@ -275,7 +275,7 @@ def load_all(con, stats, tournaments, openings, games):
 
 def main():
     stats = Stats()
-    con = connect()
+    con = connect(create=True)
     init_schema(con)
 
     tournaments = read_tournaments(stats)
