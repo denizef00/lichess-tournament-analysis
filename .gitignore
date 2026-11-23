@@ -28,3 +28,7 @@ tmp/
 
 .DS_Store
 Thumbs.db
+
+data/pipeline.lock
+data/pipeline_log.db
+logs/
