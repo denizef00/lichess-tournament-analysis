@@ -1,20 +1,28 @@
-"""M1 ingestion: lands raw Lichess tournament games + opening reference, untouched.
+"""M1/M5 ingestion: lands raw Lichess tournament games + opening reference with self-healing window.
 
-Run from the repository root:  python src/ingest.py
+Run from the repository root:  python src/ingest.py [--run-time ISO_TIMESTAMP]
 """
+import argparse
+import glob
 import os
+import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOG_DB_PATH = REPO_ROOT / "data" / "pipeline_log.db"
+RAW_DIR = REPO_ROOT / "data" / "raw"
+
 API_TOKEN = os.getenv("LICHESS_API_TOKEN")
 if not API_TOKEN:
-    print("HATA: 'LICHESS_API_TOKEN' ortam değişkeni bulunamadı. Lütfen .env dosyanızı kontrol edin!")
+    print("HATA: 'LICHESS_API_TOKEN' ortam değişkeni bulunamadı. Lütfen .env dosyanızı kontrol edin!", file=sys.stderr)
     sys.exit(1)
 
 CONTACT = os.getenv("CONTACT_INFO", "student-project")
@@ -24,7 +32,9 @@ HEADERS = {
 }
 
 NAME_FILTER = os.getenv("LICHESS_NAME_FILTER", "Hourly Bullet")
-MAX_TOURNAMENTS = int(os.getenv("MAX_TOURNAMENTS", "20"))
+MAX_TOURNAMENTS = int(os.getenv("MAX_TOURNAMENTS", "50"))
+OVERLAP_MINUTES = int(os.getenv("INGEST_OVERLAP_MINUTES", "120"))  # Kaçırılan/geciken turnuvalar için 2 saat pay
+OPENINGS_TTL_HOURS = 24
 TIMEOUT = (10, 60)  # (bağlantı, okuma) saniye
 OPENINGS_URL = "https://raw.githubusercontent.com/lichess-org/chess-openings/master/{}.tsv"
 
@@ -33,8 +43,70 @@ class AuthError(Exception):
     pass
 
 
-def utc_stamp():
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Lichess raw data ingestion")
+    parser.add_argument(
+        "--run-time",
+        type=str,
+        default=datetime.now(timezone.utc).isoformat(),
+        help="Pipeline mantıksal çalışma zamanı (ISO-8601)",
+    )
+    return parser.parse_args()
+
+
+def parse_iso_utc(ts_str: str) -> datetime:
+    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def utc_stamp(run_dt: datetime) -> str:
+    return run_dt.strftime("%Y%m%dT%H%M%SZ")
+
+
+def get_last_successful_ingest(run_dt: datetime) -> datetime | None:
+    """Önce pipeline_log.db'den son başarılı ingest zamanını okur; yoksa raw dosya adlarından bulur."""
+    if LOG_DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(LOG_DB_PATH)
+            cur = conn.execute(
+                """
+                SELECT MAX(run_time)
+                FROM pipeline_run
+                WHERE step = ? AND status = ? AND run_time < ?
+                """,
+                ("ingest", "SUCCESS", run_dt.isoformat()),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                return parse_iso_utc(row[0])
+        except sqlite3.Error:
+            pass
+
+    # Fallback: data/raw/tournaments/YYYYMMDDTHHMMSSZ.json dosya adlarından en yenisini bul
+    t_files = sorted(glob.glob(str(RAW_DIR / "tournaments" / "*.json")))
+    for fpath in reversed(t_files):
+        stem = Path(fpath).stem
+        try:
+            dt = datetime.strptime(stem, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            if dt < run_dt:
+                return dt
+        except ValueError:
+            continue
+    return None
+
+
+def already_downloaded_tournament_ids() -> set[str]:
+    """Diskte zaten .pgn dosyası inmiş olan turnuva ID'lerini döner."""
+    existing = set()
+    for fpath in glob.glob(str(RAW_DIR / "games" / "*_*.pgn")):
+        stem = Path(fpath).stem  # örn: 20261008T115537Z_abcd1234
+        parts = stem.split("_", 1)
+        if len(parts) == 2:
+            existing.add(parts[1])
+    return existing
 
 
 def request_with_retry(url, headers=None, params=None, max_retries=int(os.getenv("MAX_RETRIES", "5"))):
@@ -75,35 +147,53 @@ def request_with_retry(url, headers=None, params=None, max_retries=int(os.getenv
     return None
 
 
-def save_raw(path, content):
+def save_raw(path: Path, content: bytes) -> None:
     """Bytes olduğu gibi yazılır; var olan dosya asla ezilmez."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "xb") as f:  # "x": dosya varsa hata verir, ezmez
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "xb") as f:
         f.write(content)
 
 
-def ingest_lichess(summary):
+def ingest_lichess(summary: dict, run_dt: datetime) -> None:
     games = summary["lichess_games"] = {"files": 0, "records": 0, "failed": [], "empty": []}
+    stamp = utc_stamp(run_dt)
 
     res = request_with_retry("https://lichess.org/api/tournament", headers=HEADERS)
     if not res:
         games["failed"].append("tournament list")
         return
-    save_raw(os.path.join("data", "raw", "tournaments", f"{utc_stamp()}.json"), res.content)
+
+    t_path = RAW_DIR / "tournaments" / f"{stamp}.json"
+    save_raw(t_path, res.content)
+    games["files"] += 1
 
     try:
         finished = res.json()["finished"]
     except (ValueError, KeyError, TypeError):
         games["failed"].append("tournament list: beklenmeyen yapı")
         return
-    selected = [t for t in finished if NAME_FILTER.lower() in t.get("fullName", "").lower()]
-    selected = selected[:MAX_TOURNAMENTS]
-    print(f"{len(finished)} biten turnuva, filtreye ('{NAME_FILTER}') uyan: {len(selected)}")
-    if not selected:
-        games["failed"].append(f"filtreye uyan turnuva yok: '{NAME_FILTER}'")
-        return
 
-    for t in selected:
+    last_ok = get_last_successful_ingest(run_dt)
+    since_dt = (last_ok - timedelta(minutes=OVERLAP_MINUTES)) if last_ok else None
+    since_ms = int(since_dt.timestamp() * 1000) if since_dt else 0
+
+    existing_ids = already_downloaded_tournament_ids()
+    matched = [t for t in finished if NAME_FILTER.lower() in t.get("fullName", "").lower()]
+
+    if since_dt:
+        in_window = [t for t in matched if int(t.get("finishesAt", 0)) >= since_ms]
+        print(f"Son başarılı ingest: {last_ok.isoformat()} | Overlap penceresi başlangıcı: {since_dt.isoformat()}")
+    else:
+        in_window = matched
+        print("İlk çalıştırma veya geçmiş log yok: mevcut tüm eşleşen turnuvalar taranıyor.")
+
+    to_fetch = [t for t in in_window if t["id"] not in existing_ids][:MAX_TOURNAMENTS]
+    print(
+        f"{len(finished)} biten turnuva | '{NAME_FILTER}' eşleşen: {len(matched)} | "
+        f"pencerede: {len(in_window)} | yeni indirilecek: {len(to_fetch)}"
+    )
+
+    for t in to_fetch:
         t_id = t["id"]
         games_headers = {**HEADERS, "Accept": "application/x-chess-pgn"}
         params = {"clocks": "false", "opening": "true"}
@@ -115,17 +205,39 @@ def ingest_lichess(summary):
         elif not games_res.content.strip():
             games["empty"].append(t_id)
         else:
-            path = os.path.join("data", "raw", "games", f"{utc_stamp()}_{t_id}.pgn")
+            path = RAW_DIR / "games" / f"{stamp}_{t_id}.pgn"
             save_raw(path, games_res.content)
             n_games = games_res.content.count(b"[Event ")
             games["files"] += 1
             games["records"] += n_games
-            print(f"{t_id}: {n_games} oyun -> {path}")
+            print(f"{t_id}: {n_games} oyun -> {path.relative_to(REPO_ROOT)}")
         time.sleep(1)
 
 
-def ingest_openings(summary):
-    ref = summary["opening_reference"] = {"files": 0, "records": 0, "failed": [], "empty": []}
+def openings_are_fresh(run_dt: datetime) -> bool:
+    """Açılış TSV dosyaları son 24 saat içinde indirilmişse True döner."""
+    for letter in "abcde":
+        matches = sorted(glob.glob(str(RAW_DIR / "openings" / f"*_{letter}.tsv")))
+        if not matches:
+            return False
+        latest_stem = Path(matches[-1]).stem.split("_")[0]
+        try:
+            file_dt = datetime.strptime(latest_stem, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            if (run_dt - file_dt) > timedelta(hours=OPENINGS_TTL_HOURS):
+                return False
+        except ValueError:
+            return False
+    return True
+
+
+def ingest_openings(summary: dict, run_dt: datetime) -> None:
+    ref = summary["opening_reference"] = {"files": 0, "records": 0, "failed": [], "empty": [], "skipped": False}
+    if openings_are_fresh(run_dt):
+        ref["skipped"] = True
+        print(f"openings: son {OPENINGS_TTL_HOURS} saat içinde zaten güncel, indirme atlandı.")
+        return
+
+    stamp = utc_stamp(run_dt)
     for letter in "abcde":
         res = request_with_retry(OPENINGS_URL.format(letter))
         if res is None:
@@ -135,16 +247,19 @@ def ingest_openings(summary):
         if len(lines) < 2 or not lines[0].lower().startswith("eco"):
             ref["failed"].append(f"{letter}.tsv: beklenmeyen içerik")
             continue
-        save_raw(os.path.join("data", "raw", "openings", f"{utc_stamp()}_{letter}.tsv"), res.content)
+        save_raw(RAW_DIR / "openings" / f"{stamp}_{letter}.tsv", res.content)
         ref["files"] += 1
         ref["records"] += len(lines) - 1
         print(f"openings {letter}.tsv: {len(lines) - 1} satır")
 
 
-def print_summary(summary, started):
+def print_summary(summary: dict, started: float) -> bool:
     print("\n--- INGESTION SUMMARY ---")
     healthy = True
     for name, s in summary.items():
+        if s.get("skipped"):
+            print(f"{name}: SKIPPED (güncel)")
+            continue
         print(f"{name}: {s['files']} dosya, {s['records']} kayıt, "
               f"{len(s['failed'])} hata, {len(s['empty'])} boş")
         for item in s["failed"]:
@@ -158,13 +273,20 @@ def print_summary(summary, started):
     return healthy
 
 
-def run_pipeline():
+def run_pipeline() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+
+    args = parse_args()
+    run_dt = parse_iso_utc(args.run_time)
+
     started = time.time()
     summary = {}
-    print("--- INGESTION BAŞLADI ---")
+    print(f"--- INGESTION BAŞLADI (run_time={run_dt.isoformat()}) ---")
     try:
-        ingest_lichess(summary)
-        ingest_openings(summary)
+        ingest_lichess(summary, run_dt)
+        ingest_openings(summary, run_dt)
     except AuthError as e:
         print(f"\n[Auth Error] {e}\nToken'ı kontrol edin. İşlem durduruldu.", file=sys.stderr)
         print_summary(summary, started)
