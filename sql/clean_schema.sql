@@ -57,11 +57,10 @@ CREATE TABLE IF NOT EXISTS game_clean (
 
     white_rating_diff_raw INTEGER,
     white_rating_diff     INTEGER,
-    white_rating_diff_flag TEXT NOT NULL CHECK (white_rating_diff_flag IN ('ok', 'unusual_large')),
+    white_rating_diff_flag TEXT NOT NULL CHECK (white_rating_diff_flag IN ('ok', 'unusual_large', 'missing_not_reported', 'invalid_range')),
     black_rating_diff_raw INTEGER,
     black_rating_diff     INTEGER,
-    black_rating_diff_flag TEXT NOT NULL CHECK (black_rating_diff_flag IN ('ok', 'unusual_large')),
-
+    black_rating_diff_flag TEXT NOT NULL CHECK (black_rating_diff_flag IN ('ok', 'unusual_large', 'missing_not_reported', 'invalid_range')),
     moves_raw             TEXT,
     moves                 TEXT,
     moves_flag            TEXT NOT NULL CHECK (moves_flag IN ('ok', 'no_moves_played'))
