@@ -3,17 +3,20 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Script nerede çalıştırılırsa çalıştırılsın repo kök dizinini (lichess-tournament-analysis) bulur
+# Finds the repository root no matter where the script is started from
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = REPO_ROOT / "data" / "pipeline.lock"
 LOG_DB_PATH = REPO_ROOT / "data" / "pipeline_log.db"
 
-# Kişi B scriptlere --run-time eklediğinde burayı True yapın
-PASS_RUN_TIME = False
+# A lock older than this is a leftover of a crashed run (all step timeouts together: 780 s)
+LOCK_MAX_AGE_SEC = 30 * 60
+
+PASS_RUN_TIME = True
 
 STEPS = [
     ("ingest", REPO_ROOT / "src" / "ingest.py", 300),
@@ -80,13 +83,22 @@ def log_step(
 
 def acquire_lock() -> bool:
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(f"pid={os.getpid()} started_at={datetime.now(timezone.utc).isoformat()}\n")
-        return True
-    except FileExistsError:
-        return False
+    for _ in range(2):
+        try:
+            fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(f"pid={os.getpid()} started_at={datetime.now(timezone.utc).isoformat()}\n")
+            return True
+        except FileExistsError:
+            try:
+                age = time.time() - LOCK_PATH.stat().st_mtime
+            except FileNotFoundError:
+                continue  # released between the two calls, try again
+            if age < LOCK_MAX_AGE_SEC:
+                return False
+            print(f"[STALE LOCK] removing a lock older than {LOCK_MAX_AGE_SEC}s", file=sys.stderr)
+            LOCK_PATH.unlink(missing_ok=True)
+    return False
 
 
 def release_lock() -> None:
@@ -100,12 +112,12 @@ def parse_args() -> argparse.Namespace:
         "--run-time",
         type=str,
         default=datetime.now(timezone.utc).isoformat(),
-        help="Pipeline mantiksal calisma zamani (ISO-8601)",
+        help="Pipeline logical run time (ISO-8601)",
     )
     parser.add_argument(
         "--skip-ingest",
         action="store_true",
-        help="Aga baglanmadan mevcut ham verilerle calistir",
+        help="Do not touch the network; run everything else from the landed raw data",
     )
     return parser.parse_args()
 
@@ -119,7 +131,7 @@ def main() -> int:
     run_id = str(uuid.uuid4())[:8]
 
     if not acquire_lock():
-        print(f"[LOCKED] Baska bir pipeline sureci calisiyor ({LOCK_PATH}). Cikis: 75", file=sys.stderr)
+        print(f"[{run_id}] RESULT: NOT STARTED, another run is in progress ({LOCK_PATH}). Exit 75", file=sys.stderr)
         return 75
 
     LOG_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +149,7 @@ def main() -> int:
                 cmd.extend(["--run-time", args.run_time])
 
             started_at = datetime.now(timezone.utc)
-            print(f"[{run_id}] {step_name} baslatiliyor: {' '.join(cmd)}")
+            print(f"[{run_id}] starting {step_name}: {' '.join(cmd)}")
 
             try:
                 result = subprocess.run(
@@ -157,11 +169,12 @@ def main() -> int:
 
                 if result.returncode != 0:
                     err_msg = (result.stderr or result.stdout or "Unknown error").strip()[-1000:]
-                    print(f"[{run_id}] {step_name} HATA (kod={result.returncode}):\n{err_msg}", file=sys.stderr)
+                    print(f"[{run_id}] {step_name} ERROR (exit {result.returncode}):\n{err_msg}", file=sys.stderr)
                     log_step(
                         conn, run_id, args.run_time, step_name,
                         started_at, finished_at, "FAILED", result.returncode, err_msg
                     )
+                    print(f"[{run_id}] RESULT: FAILED at step {step_name} (exit {result.returncode})")
                     return result.returncode
 
                 log_step(conn, run_id, args.run_time, step_name, started_at, finished_at, "SUCCESS", 0, None)
@@ -170,14 +183,15 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 finished_at = datetime.now(timezone.utc)
                 err_msg = f"Step timed out after {timeout_sec}s"
-                print(f"[{run_id}] {step_name} TIMEOUT (kod=124): {err_msg}", file=sys.stderr)
+                print(f"[{run_id}] {step_name} TIMEOUT (exit 124): {err_msg}", file=sys.stderr)
                 log_step(
                     conn, run_id, args.run_time, step_name,
                     started_at, finished_at, "TIMEOUT", 124, err_msg
                 )
+                print(f"[{run_id}] RESULT: FAILED at step {step_name} (exit 124)")
                 return 124
 
-        print(f"[{run_id}] Tum pipeline basariyla tamamlandi.")
+        print(f"[{run_id}] RESULT: SUCCESS")
         return 0
 
     finally:
