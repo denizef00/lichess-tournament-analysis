@@ -7,6 +7,18 @@ import tempfile
 from db import connect, DB_PATH
 import load
 
+COUNT_SQL = {
+    "tournament": "SELECT COUNT(*) FROM tournament",
+    "player": "SELECT COUNT(*) FROM player",
+    "opening": "SELECT COUNT(*) FROM opening",
+    "opening_line": "SELECT COUNT(*) FROM opening_line",
+    "game": "SELECT COUNT(*) FROM game",
+    "quarantine_game": "SELECT COUNT(*) FROM quarantine_game",
+    "category_map": "SELECT COUNT(*) FROM category_map",
+    "player_alias": "SELECT COUNT(*) FROM player_alias",
+    "tournament_clean": "SELECT COUNT(*) FROM tournament_clean",
+    "game_clean": "SELECT COUNT(*) FROM game_clean",
+}
 
 def get_table_counts(con: sqlite3.Connection) -> dict[str, int]:
     tables = [
@@ -15,7 +27,7 @@ def get_table_counts(con: sqlite3.Connection) -> dict[str, int]:
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     ]
-    return {t: con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0] for t in tables}
+    return {t: con.execute(COUNT_SQL[t]).fetchone()[0] for t in tables}
 
 
 def test_duplicate_natural_key(con: sqlite3.Connection) -> bool:
