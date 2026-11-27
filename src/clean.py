@@ -15,22 +15,37 @@ import csv
 import statistics
 import sys
 from collections import Counter, defaultdict
-
+import argparse
 import clean_config as C
 from db import connect, ROOT
 
 CLEAN_SCHEMA = ROOT / "sql" / "clean_schema.sql"
 MAPPINGS = ROOT / "data" / C.MAPPINGS_DIRNAME
 
-TOURNAMENT_COLS = ("tournament_key", "status_raw", "status", "status_flag",
-                   "nb_players_raw", "nb_players", "nb_players_flag",
-                   "max_rating_raw", "max_rating", "max_rating_flag")
-GAME_COLS = ("game_id", "opening_key_raw", "opening_key", "opening_key_flag",
-             "white_elo_raw", "white_elo", "white_elo_flag",
-             "black_elo_raw", "black_elo", "black_elo_flag",
-             "white_rating_diff_raw", "white_rating_diff", "white_rating_diff_flag",
-             "black_rating_diff_raw", "black_rating_diff", "black_rating_diff_flag",
-             "moves_raw", "moves", "moves_flag")
+TOURNAMENT_INSERT = """INSERT INTO tournament_clean (
+    tournament_key, status_raw, status, status_flag,
+    nb_players_raw, nb_players, nb_players_flag,
+    max_rating_raw, max_rating, max_rating_flag)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+GAME_INSERT = """INSERT INTO game_clean (
+    game_id, opening_key_raw, opening_key, opening_key_flag,
+    white_elo_raw, white_elo, white_elo_flag,
+    black_elo_raw, black_elo, black_elo_flag,
+    white_rating_diff_raw, white_rating_diff, white_rating_diff_flag,
+    black_rating_diff_raw, black_rating_diff, black_rating_diff_flag,
+    moves_raw, moves, moves_flag)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+RAW_COUNT_SQL = {
+    "tournament": "SELECT COUNT(*) FROM tournament",
+    "game": "SELECT COUNT(*) FROM game",
+}
+CLEAN_SELECT_SQL = {
+    "tournament_clean": "SELECT * FROM tournament_clean",
+    "game_clean": "SELECT * FROM game_clean",
+}
+
 SUMMARY_TABLES = (("tournament_clean", "tournament"), ("game_clean", "game"))
 
 
@@ -52,10 +67,7 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
-def insert_sql(table, cols):
-    """Build an INSERT with named columns and placeholders only (no values in the SQL text)."""
-    return ("INSERT INTO " + table + " (" + ", ".join(cols) + ") VALUES ("
-            + ", ".join("?" * len(cols)) + ")")
+
 
 
 # ---------- tournament ----------------------------------------------------
@@ -227,32 +239,41 @@ def build(con):
     with con:   # one transaction: on any error everything is rolled back
         report = load_mappings(con)
         con.execute("DELETE FROM tournament_clean")
-        con.executemany(insert_sql("tournament_clean", TOURNAMENT_COLS), t_rows)
+        con.executemany(TOURNAMENT_INSERT, t_rows)
         con.execute("DELETE FROM game_clean")
-        con.executemany(insert_sql("game_clean", GAME_COLS), g_rows)
+        con.executemany(GAME_INSERT, g_rows)
     return report
 
-
 def print_summary(con, report):
-    def n(table):
-        return con.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
-
     for clean, raw in SUMMARY_TABLES:
-        print(f"{clean}: {n(clean):,} rows (raw: {n(raw):,})")
-        flag_cols = [r[0] for r in con.execute(
-            "SELECT name FROM pragma_table_info(?)", (clean,)) if r[0].endswith("_flag")]
+        rows = con.execute(CLEAN_SELECT_SQL[clean]).fetchall()
+        raw_n = con.execute(RAW_COUNT_SQL[raw]).fetchone()[0]
+        print(f"{clean}: {len(rows):,} rows (raw: {raw_n:,})")
+        flag_cols = [c for c in rows[0].keys() if c.endswith("_flag")] if rows else []
         for c in flag_cols:
-            counts = Counter({r[0]: r[1] for r in con.execute(
-                "SELECT " + c + ", COUNT(*) FROM " + clean + " GROUP BY " + c)})
+            counts = Counter(r[c] for r in rows)
             print(f"  {c:24s} " + "  ".join(f"{k}={v:,}" for k, v in sorted(counts.items())))
     print(f"mappings: player_alias {report['player_alias']} rows | "
           f"category_map {report['category_map']} rows | "
           f"unmatched: {report['unmatched'] or 'none'}")
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Build the cleaned layer from M2 tables")
+    parser.add_argument(
+        "--run-time",
+        type=str,
+        default=None,
+        help="Logical pipeline run timestamp in ISO-8601 UTC format",
+    )
+    return parser.parse_args()
+
 
 def main():
+    args = parse_args()
     con = connect()
     try:
+        if args.run_time:
+            print(f"run_time: {args.run_time}")
         con.executescript(CLEAN_SCHEMA.read_text(encoding="utf-8"))   # IF NOT EXISTS: idempotent
         report = build(con)
         print_summary(con, report)
@@ -266,7 +287,6 @@ def main():
         print(f"ERROR: {e!r}")
         print("STATUS: FAILED")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
