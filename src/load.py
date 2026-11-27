@@ -2,7 +2,7 @@ import csv
 import json
 import re
 from datetime import datetime, timezone
-
+import argparse
 from db import connect, init_schema, ROOT
 
 RAW = ROOT / "data" / "raw"
@@ -61,10 +61,17 @@ def pick(v, *keys):
         return None
     return v
 
+COUNT_SQL = {
+    "tournament": "SELECT COUNT(*) FROM tournament",
+    "player": "SELECT COUNT(*) FROM player",
+    "opening": "SELECT COUNT(*) FROM opening",
+    "game": "SELECT COUNT(*) FROM game",
+    "quarantine_game": "SELECT COUNT(*) FROM quarantine_game",
+}
+
 
 def count(con, table):
-    return con.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
-
+    return con.execute(COUNT_SQL[table]).fetchone()[0]
 
 def newest_wins(store, key, rec):
     old = store.get(key)
@@ -272,8 +279,19 @@ def load_all(con, stats, tournaments, openings, games):
         for g in games:
             load_game(con, stats, g)
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Load raw Lichess files into SQLite")
+    parser.add_argument(
+        "--run-time",
+        type=str,
+        default=None,
+        help="Logical pipeline run timestamp in ISO-8601 UTC format",
+    )
+    return parser.parse_args()
+
 
 def main():
+    args = parse_args()
     stats = Stats()
     con = connect(create=True)
     init_schema(con)
@@ -293,6 +311,8 @@ def main():
     def line(t):
         return f"{after[t]} in database ({after[t] - before[t]:+d} this run)"
 
+    if args.run_time:
+        print(f"run_time:          {args.run_time}")
     print(f"files read:        {len(stats.files)} raw files")
     print(f"tournaments:       {line('tournament')}")
     print(f"players:           {line('player')}")
@@ -302,7 +322,6 @@ def main():
     print(f"quarantined:       {stats.quarantined} records")
     print(f"foreign_key_check: {'OK' if not fk else fk}")
     print("STATUS: COMPLETE" if not fk else "STATUS: FAILED")
-
 
 if __name__ == "__main__":
     main()
