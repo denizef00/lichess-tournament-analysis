@@ -11,11 +11,12 @@ Rule order (the first rule that applies wins):
 
 Nothing is imputed: untrusted values become NULL, everything else is kept.
 """
+import os
 import csv
 import statistics
 import sys
 from collections import Counter, defaultdict
-import argparse
+
 import clean_config as C
 from db import connect, ROOT
 
@@ -26,7 +27,8 @@ TOURNAMENT_INSERT = """INSERT INTO tournament_clean (
     tournament_key, status_raw, status, status_flag,
     nb_players_raw, nb_players, nb_players_flag,
     max_rating_raw, max_rating, max_rating_flag)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    VALUES (?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?)"""
 
 GAME_INSERT = """INSERT INTO game_clean (
     game_id, opening_key_raw, opening_key, opening_key_flag,
@@ -35,20 +37,44 @@ GAME_INSERT = """INSERT INTO game_clean (
     white_rating_diff_raw, white_rating_diff, white_rating_diff_flag,
     black_rating_diff_raw, black_rating_diff, black_rating_diff_flag,
     moves_raw, moves, moves_flag)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-
-RAW_COUNT_SQL = {
-    "tournament": "SELECT COUNT(*) FROM tournament",
-    "game": "SELECT COUNT(*) FROM game",
-}
-CLEAN_SELECT_SQL = {
-    "tournament_clean": "SELECT * FROM tournament_clean",
-    "game_clean": "SELECT * FROM game_clean",
-}
+    VALUES (?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?)"""
 
 SUMMARY_TABLES = (("tournament_clean", "tournament"), ("game_clean", "game"))
 
+ROW_COUNT_SQL = {
+    "tournament": "SELECT COUNT(*) FROM tournament",
+    "tournament_clean": "SELECT COUNT(*) FROM tournament_clean",
+    "game": "SELECT COUNT(*) FROM game",
+    "game_clean": "SELECT COUNT(*) FROM game_clean",
+}
 
+FLAG_SQL = {
+    "tournament_clean": (
+        ("status_flag",
+         "SELECT status_flag, COUNT(*) FROM tournament_clean GROUP BY status_flag"),
+        ("nb_players_flag",
+         "SELECT nb_players_flag, COUNT(*) FROM tournament_clean GROUP BY nb_players_flag"),
+        ("max_rating_flag",
+         "SELECT max_rating_flag, COUNT(*) FROM tournament_clean GROUP BY max_rating_flag"),
+    ),
+    "game_clean": (
+        ("opening_key_flag",
+         "SELECT opening_key_flag, COUNT(*) FROM game_clean GROUP BY opening_key_flag"),
+        ("white_elo_flag",
+         "SELECT white_elo_flag, COUNT(*) FROM game_clean GROUP BY white_elo_flag"),
+        ("black_elo_flag",
+         "SELECT black_elo_flag, COUNT(*) FROM game_clean GROUP BY black_elo_flag"),
+        ("white_rating_diff_flag",
+         "SELECT white_rating_diff_flag, COUNT(*) FROM game_clean GROUP BY white_rating_diff_flag"),
+        ("black_rating_diff_flag",
+         "SELECT black_rating_diff_flag, COUNT(*) FROM game_clean GROUP BY black_rating_diff_flag"),
+        ("moves_flag",
+         "SELECT moves_flag, COUNT(*) FROM game_clean GROUP BY moves_flag"),
+    ),
+}
 # ---------- helpers -------------------------------------------------------
 def iqr_fences(values, k):
     """Return (lower, upper) IQR fences, or None if there are too few values."""
@@ -65,10 +91,6 @@ def read_csv(path):
     # utf-8-sig strips a BOM if the file was saved from Excel
     with path.open(encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
-
-
-
-
 
 # ---------- tournament ----------------------------------------------------
 def clean_tournaments(con):
@@ -241,39 +263,28 @@ def build(con):
         con.execute("DELETE FROM tournament_clean")
         con.executemany(TOURNAMENT_INSERT, t_rows)
         con.execute("DELETE FROM game_clean")
+        if os.environ.get("PIPELINE_DRILL_FAIL_CLEAN") == "1":  # drill hook, off by default
+            raise RuntimeError("drill: injected failure after DELETE FROM game_clean")
         con.executemany(GAME_INSERT, g_rows)
     return report
 
+
 def print_summary(con, report):
     for clean, raw in SUMMARY_TABLES:
-        rows = con.execute(CLEAN_SELECT_SQL[clean]).fetchall()
-        raw_n = con.execute(RAW_COUNT_SQL[raw]).fetchone()[0]
-        print(f"{clean}: {len(rows):,} rows (raw: {raw_n:,})")
-        flag_cols = [c for c in rows[0].keys() if c.endswith("_flag")] if rows else []
-        for c in flag_cols:
-            counts = Counter(r[c] for r in rows)
-            print(f"  {c:24s} " + "  ".join(f"{k}={v:,}" for k, v in sorted(counts.items())))
+        clean_n = con.execute(ROW_COUNT_SQL[clean]).fetchone()[0]
+        raw_n = con.execute(ROW_COUNT_SQL[raw]).fetchone()[0]
+        print(f"{clean}: {clean_n:,} rows (raw: {raw_n:,})")
+        for flag_col, sql in FLAG_SQL[clean]:
+            counts = dict(con.execute(sql).fetchall())
+            print(f"  {flag_col:24s} " + "  ".join(f"{k}={v:,}" for k, v in sorted(counts.items())))
     print(f"mappings: player_alias {report['player_alias']} rows | "
           f"category_map {report['category_map']} rows | "
           f"unmatched: {report['unmatched'] or 'none'}")
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Build the cleaned layer from M2 tables")
-    parser.add_argument(
-        "--run-time",
-        type=str,
-        default=None,
-        help="Logical pipeline run timestamp in ISO-8601 UTC format",
-    )
-    return parser.parse_args()
-
 
 def main():
-    args = parse_args()
     con = connect()
     try:
-        if args.run_time:
-            print(f"run_time: {args.run_time}")
         con.executescript(CLEAN_SCHEMA.read_text(encoding="utf-8"))   # IF NOT EXISTS: idempotent
         report = build(con)
         print_summary(con, report)
@@ -287,6 +298,7 @@ def main():
         print(f"ERROR: {e!r}")
         print("STATUS: FAILED")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
