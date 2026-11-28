@@ -14,7 +14,7 @@ def connect(path=DB_PATH, create: bool = False):
     if not create and not path.exists():
         raise FileNotFoundError(f"Database bulunamadi: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path,timeout=30)
     con.execute("PRAGMA foreign_keys = ON")
     con.row_factory = sqlite3.Row
     return con
@@ -27,7 +27,7 @@ def init_schema(con):
 def get_log_conn() -> sqlite3.Connection:
     LOG_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     (ROOT / "logs").mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(LOG_DB_PATH)
+    con = sqlite3.connect(LOG_DB_PATH, timeout=30)
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS pipeline_run (
