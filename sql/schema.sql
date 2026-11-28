@@ -62,3 +62,5 @@ CREATE TABLE IF NOT EXISTS quarantine_game (
     retrieved_at  TEXT NOT NULL,
     UNIQUE (game_id, reason)                          
 ) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_game_tournament ON game (tournament_key);
