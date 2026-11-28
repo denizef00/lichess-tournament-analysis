@@ -15,6 +15,8 @@ LOG_DB_PATH = REPO_ROOT / "data" / "pipeline_log.db"
 
 # A lock older than this is a leftover of a crashed run (all step timeouts together: 780 s)
 LOCK_MAX_AGE_SEC = 30 * 60
+# Drill hook, off by default (documented in docs/pipeline.md): "clean=1" overrides one step's timeout.
+DRILL_TIMEOUT = os.getenv("PIPELINE_DRILL_TIMEOUT", "")
 
 PASS_RUN_TIME = True
 
@@ -80,6 +82,10 @@ def log_step(
     )
     conn.commit()
 
+def landed_since(started_at: datetime) -> bool:
+    """True if ingest wrote a tournaments file after it started (an exit code 0 alone proves nothing)."""
+    folder = REPO_ROOT / "data" / "raw" / "tournaments"
+    return any(p.stat().st_mtime >= started_at.timestamp() - 2 for p in folder.glob("*.json"))
 
 def acquire_lock() -> bool:
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -135,7 +141,7 @@ def main() -> int:
         return 75
 
     LOG_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(LOG_DB_PATH)
+    conn = sqlite3.connect(LOG_DB_PATH, timeout=30)
     init_log_db(conn)
 
     try:
@@ -143,6 +149,9 @@ def main() -> int:
             if step_name == "ingest" and args.skip_ingest:
                 print(f"[{run_id}] {step_name}: SKIPPED (--skip-ingest)")
                 continue
+
+            if DRILL_TIMEOUT.startswith(step_name + "="):  # drill hook, off by default
+                timeout_sec = int(DRILL_TIMEOUT.split("=", 1)[1])
 
             cmd = [sys.executable, str(script_path)]
             if PASS_RUN_TIME:
@@ -177,12 +186,23 @@ def main() -> int:
                     print(f"[{run_id}] RESULT: FAILED at step {step_name} (exit {result.returncode})")
                     return result.returncode
 
+                if step_name == "ingest" and not landed_since(started_at):
+                    err_msg = "ingest exited 0 but landed no tournaments file"
+                    print(f"[{run_id}] {step_name} ERROR: {err_msg}", file=sys.stderr)
+                    log_step(conn, run_id, args.run_time, step_name,
+                             started_at, finished_at, "FAILED", 3, err_msg)
+                    print(f"[{run_id}] RESULT: FAILED at step {step_name} (exit 3)")
+                    return 3
+
                 log_step(conn, run_id, args.run_time, step_name, started_at, finished_at, "SUCCESS", 0, None)
                 print(f"[{run_id}] {step_name}: SUCCESS")
 
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 finished_at = datetime.now(timezone.utc)
-                err_msg = f"Step timed out after {timeout_sec}s"
+                partial = exc.stdout or b""
+                if isinstance(partial, bytes):
+                    partial = partial.decode("utf-8", errors="replace")
+                err_msg = f"Step timed out after {timeout_sec}s. Last output: {partial.strip()[-600:]}"
                 print(f"[{run_id}] {step_name} TIMEOUT (exit 124): {err_msg}", file=sys.stderr)
                 log_step(
                     conn, run_id, args.run_time, step_name,
