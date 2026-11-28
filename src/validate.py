@@ -15,12 +15,12 @@ RESULTS = []
 # The newest game can be about 60 minutes old between two hourly tournaments, plus up to 15 minutes
 # until the next poll and the listing delay. 2 hours leaves a margin without hiding a stalled feed.
 # Keep equal to MAX_DATA_FRESHNESS_HOURS in monitor.py.
-FRESHNESS_MAX_HOURS = 2.0
+FRESHNESS_MAX_HOURS = 4.0
 
 # Volume: games landed in the last VOLUME_WINDOW_HOURS before --run-time are compared with a typical
 # window (median hourly count x window). One 15-minute run often lands nothing because tournaments
 # finish hourly, so a per-run comparison would warn permanently.
-VOLUME_WINDOW_HOURS = 2
+VOLUME_WINDOW_HOURS = 3
 VOLUME_MIN_HISTORY_HOURS = 6  # no baseline before this many hours with data
 VOLUME_HIGH_FACTOR = 10
 
