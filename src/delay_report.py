@@ -12,6 +12,7 @@ from pathlib import Path
 RAW = Path("data/raw")
 NAME_FILTER = "hourly bullet"
 MAX_PAIR_GAP_MIN = 130  # only compare consecutive tournament files at most ~2 h apart
+LIST_SIZE = 20          # the source lists exactly this many finished tournaments
 TS_RE = re.compile(r"(\d{8}T\d{6}Z)")
 UTC_RE = re.compile(r'^\[(UTCDate|UTCTime) "(.*)"\]')
 
@@ -48,6 +49,7 @@ for p in sorted(RAW.glob("tournaments/*.json"), key=stamp_of):
 
 list_sizes, horizon_all, horizon_match = [], [], []
 normal_delay, late_listed = [], []
+new_per_pair = []  # (minutes between the two polls, tournaments that are new in the later list)
 revised = compared = 0
 
 for i, (s, finished) in enumerate(snapshots):
@@ -65,6 +67,7 @@ for i, (s, finished) in enumerate(snapshots):
     if minutes(s, prev_s) > MAX_PAIR_GAP_MIN:
         continue
     prev_by_id = {t["id"]: t for t in prev_finished}
+    new_per_pair.append((minutes(s, prev_s), sum(1 for t in finished if t["id"] not in prev_by_id)))
     for t in finished:
         old = prev_by_id.get(t["id"])
         if old is not None:
@@ -118,3 +121,11 @@ print(f"== Revisions: nbPlayers/status changed between consecutive polls: {revis
 print("== Games")
 print("played_at -> our download, minutes (includes our own polling interval):", describe(game_delay))
 print("last game ended after nominal tournament end, minutes:", describe(after_end))
+
+short = [n for gap, n in new_per_pair if gap <= 20]
+long_gap = [n for gap, n in new_per_pair if 40 <= gap <= MAX_PAIR_GAP_MIN]
+print(f"== Newly finished tournaments between consecutive polls (the list holds {LIST_SIZE})")
+print("polls <= 20 min apart: ", describe(short))
+print("polls 40-130 min apart:", describe(long_gap))
+print(f"polls where all {LIST_SIZE} listed tournaments were new (list may have overflowed):",
+      sum(1 for _, n in new_per_pair if n >= LIST_SIZE))
